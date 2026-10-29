@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+.pytest_cache/
+
+# Data and models: the dataset is downloaded from Kaggle, everything else is regenerated
+data/raw/*
+data/processed/
+data/reference/
+models/
+mlruns/
+mlartifacts/
+
+# Run-time outputs
+reports/drift/
+tests/_test.db
+tests/_reports/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.zip
+!data/raw/README.md

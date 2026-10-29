@@ -1,0 +1,103 @@
+# Phase 6: self-healing pipeline settings (mlops/pipeline.py, dags/cardio_self_healing.py).
+# A DAG run can override any top-level key through its "conf", e.g. {"canary": {"wait_minutes": 2}}.
+
+trigger:
+  cooldown_hours: 24          # no new retraining within 24 h of the last promotion / rollback
+  require_retrain_recommended: true   # set by the drift job: critical in consecutive windows
+
+# How the drift is diagnosed decides what happens (see diagnose() for the table)
+diagnosis:
+  input_checks: [feature_drift_share, psi_key_features]
+  accuracy_checks: [auc_drop, calibration]   # either one failing = the model got worse
+  data_quality_check: data_quality
+
+validation:
+  max_invalid_share: 0.05     # stop if more than 5% of labelled production rows are invalid
+  min_training_rows: 1000
+
+training:
+  candidates: [lightgbm, xgboost]
+  monotone: true              # medical rules inside the model: risk only rises with BP, age, cholesterol, glucose
+  holdout_recent_share: 0.3   # newest 30% of human labels are kept back to evaluate on
+  human_weight: 1.0
+  human_recent_days: 14
+  human_recent_weight: 2.0    # recent confirmed diagnoses count double
+  concept_recent_weight: 10.0 # under concept drift, recent diagnoses must outweigh the old meaning
+  # Under concept drift the pipeline tries several ways to learn the NEW pattern and keeps the
+  # one that best predicts held-out new-pattern cases. "New pattern" = confirmed diagnoses since
+  # the drift started (window start of the current run of critical drift checks).
+  concept_strategies:
+    - {name: weighted_x10, new_weight: 10}         # gentle: keep the old data, new cases count 10x
+    - {name: weighted_x50, new_weight: 50}         # strong: new cases dominate
+    - {name: new_pattern_only, old_data: false}    # forget the old meaning entirely
+  min_new_pattern_rows: 300   # fewer confirmed new-pattern cases -> only the weighted strategies
+  pseudo_weight: 0.5
+  min_recent_eval: 100        # labelled rows needed for the "recent patients" gates
+
+# Promotion gates: the candidate must pass every one of them
+gates:
+  default:
+    max_auc_drop_holdout: 0.01   # vs champion on the validation set: do not forget the old population
+    max_auc_drop_recent: 0.01    # vs champion on recent confirmed cases: handle today's patients
+    max_recall_drop: 0.02        # on recent cases if available, else validation
+    max_brier_increase: 0.01     # calibration
+    max_recall_gap_sex: 0.05     # fairness: recall gap between women and men (validation set)
+  retrain_concept:               # the old meaning is partly obsolete: forgetting it is expected
+    max_auc_drop_holdout: 0.35   # hard limit; the recent-gain gate catches broken models
+    approval_if_auc_drop_holdout_over: 0.05   # forgets more than this -> a person must confirm
+    min_auc_gain_recent: 0.02    # ...but the candidate must clearly fix recent patients:
+    min_brier_drop_recent: 0.01  #    AUC +0.02 OR Brier -0.01 (a guideline change shifts the risk LEVEL, not the ranking)
+    max_recall_drop: 0.05
+    max_brier_increase: 0.03
+    max_recall_gap_sex: 0.05
+
+approval:
+  timeout_minutes: 1440       # unanswered for 24 h -> rejected (the champion stays)
+  poll_seconds: 15
+
+canary:
+  fraction: 0.10              # 10% of requests go to the candidate
+  wait_minutes: 30            # observation time before deciding (override per run for demos)
+  poll_seconds: 15
+  min_predictions: 50         # fewer canary predictions than this -> cannot judge -> roll back
+  max_error_rate: 0.01        # failures inside the candidate model
+  max_latency_ms: 300         # p95 model time per patient
+  max_latency_ratio: 2.0      # vs champion p95...
+  ratio_min_ms: 20            # ...only when the candidate's p95 is above this. Below it the ratio is
+                              # noise: batch size changes the per-patient time more than the model does
+  max_mean_risk_shift: 0.10   # live risk shift vs champion may differ this much from the shift
+                              # expected on confirmed recent cases (0 when nothing changed)
+
+# Clinical sanity checks for every candidate (mlops/clinical.py). Edit with a clinician.
+# A candidate that fails any of them is rejected, however good its statistics look.
+clinical:
+  cases:
+    - name: "45, severe hypertension, high cholesterol, smoker"
+      patient: {age_years: 45, gender: 2, height: 172, weight: 88, ap_hi: 160, ap_lo: 100, cholesterol: 3, smoke: 1, active: 0}
+      min_risk: 0.60
+    - name: "62, severe hypertension, high cholesterol"
+      patient: {age_years: 62, ap_hi: 165, ap_lo: 100, cholesterol: 3, active: 0}
+      min_risk: 0.65
+    - name: "55, stage 2 hypertension"
+      patient: {age_years: 55, ap_hi: 150, ap_lo: 95}
+      min_risk: 0.55
+    - name: "48, stage 2 hypertension, high glucose"
+      patient: {age_years: 48, ap_hi: 155, ap_lo: 95, gluc: 3, weight: 85}
+      min_risk: 0.55
+    - name: "30, normal blood pressure, healthy weight, active"
+      patient: {age_years: 30, gender: 1, height: 165, weight: 58, ap_hi: 110, ap_lo: 70}
+      max_risk: 0.35
+    - name: "40, normal blood pressure, normal cholesterol"
+      patient: {age_years: 40, ap_hi: 115, ap_lo: 75}
+      max_risk: 0.40
+  worsening:
+    tolerance: 0.02         # risk may not FALL by more than this when a risk factor gets worse
+    patients:
+      - {label: "35-year-old", age_years: 35, ap_hi: 120, ap_lo: 80}
+      - {label: "45-year-old", age_years: 45, ap_hi: 130, ap_lo: 85, cholesterol: 2}
+      - {label: "60-year-old", age_years: 60, ap_hi: 140, ap_lo: 90}
+    changes:                # "+N" = add N to the patient's value, a number = set it
+      "BP +30/+15": {ap_hi: "+30", ap_lo: "+15"}
+      "cholesterol to high": {cholesterol: 3}
+      "glucose to high": {gluc: 3}
+      "10 years older": {age_years: "+10"}

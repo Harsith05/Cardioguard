@@ -1,0 +1,51 @@
+# Phase 2 drift thresholds. Starting values - tune them on your own traffic.
+# Every check returns ok / warning / critical; the worst one is the run's status.
+
+window_size: 1000          # latest N production predictions compared per run
+min_rows: 200              # fewer rows than this -> run is skipped (too noisy)
+reference_sample: 20000    # rows sampled from the reference data (speed)
+
+feature_drift:             # Evidently, one test per input feature
+  num_method: wasserstein  # normed Wasserstein distance (numeric features)
+  num_threshold: 0.1
+  cat_method: jensenshannon  # Jensen-Shannon distance (categorical features)
+  cat_threshold: 0.1
+  share_warning: 0.30      # share of features flagged as drifted
+  share_critical: 0.50
+
+psi:                       # Population Stability Index on key clinical features
+  features: [ap_hi, ap_lo, age_years, bmi, cholesterol, gluc]   # categories: one bin per level
+  bins: 10
+  warning: 0.10
+  critical: 0.25
+
+prediction_drift:          # drift of the model's output probability
+  method: wasserstein
+  threshold: 0.1
+  consecutive_for_critical: 2   # detected this many windows in a row -> critical
+
+confidence:                # mean of max(p, 1-p), compared with the reference
+  warning_drop: 0.05       # 5 percentage points
+  critical_drop: 0.10
+
+performance:               # needs human-confirmed labels (never pseudo-labels)
+  min_labels: 100
+  warning_auc_drop: 0.03
+  critical_auc_drop: 0.05
+  # A drop only counts if the bootstrap CI's upper bound is below the training AUC.
+  # Without this, ~200 labels give a false warning in ~18% of normal windows.
+  # 99% (not 95%) because the check runs every window, so false alarms add up.
+  bootstrap: 500
+  confidence_level: 0.99
+
+data_quality:              # rows with missing or out-of-range inputs
+  warning_share: 0.02
+  critical_share: 0.05
+
+calibration:               # share of confirmed patients who are sick vs mean predicted risk
+  warning_gap: 0.05        # 5 percentage points (only if significant at 99%)
+  critical_gap: 0.10
+  z: 2.58
+
+retraining:
+  consecutive_critical: 2  # critical this many runs in a row -> recommend retraining

@@ -1,0 +1,344 @@
+# CardioGuard: the whole system in Docker (Phase 4; Phase 5 adds pseudo-labelling;
+# Phase 6 adds MLflow + Airflow for self-healing).
+#
+#   docker compose up -d --build       build the app image and start everything
+#   docker compose ps                  all services should be "running" / "healthy"
+#
+#   App (via Nginx)  http://localhost:8000          /monitoring  /docs
+#   Grafana          http://localhost:3000          (admin / admin, or anonymous view)
+#   Prometheus       http://localhost:9090
+#   Pushgateway      http://localhost:9091
+#   MLflow           http://localhost:5000          models, versions, champion/candidate
+#   Airflow          http://localhost:8080          self-healing DAG (admin / admin)
+#
+#   docker compose --profile tools run --rm trainer      retrain inside the container
+#   docker compose up -d --scale api=3                   three API containers behind Nginx
+#
+# Settings come from .env (see .env.example). Inside Docker, services reach each other by
+# name (postgres:5432, mongodb:27017, ...), whatever ports are published on your computer.
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
+
+# Shared settings for every service that runs the app image. Only "api" has a build
+# section: if several services build the same image in parallel, Docker Desktop fails
+# with 'image "cardioguard-app:latest": already exists'. The others reuse api's image.
+x-app: &app
+  image: cardioguard-app:latest
+  pull_policy: never                   # built locally, never on Docker Hub
+  logging: *logging
+  environment: &app-env
+    DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-cardio}:${POSTGRES_PASSWORD:-cardio}@postgres:5432/cardio
+    MONGO_URI: mongodb://mongodb:27017
+    MONGO_DB: cardioguard
+    PUSHGATEWAY_URL: pushgateway:9091
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    CHAOS_ENABLED: ${CHAOS_ENABLED:-0}
+    PSEUDO_LABEL_ENABLED: ${PSEUDO_LABEL_ENABLED:-1}   # Phase 5: scheduler pseudo-labels after each drift check
+    # Phase 6
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"     # if MLflow is down, fall back fast instead of waiting minutes
+    MLFLOW_HTTP_REQUEST_TIMEOUT: "15"
+    PROMETHEUS_URL: http://prometheus:9090
+    DEPLOYMENT_POLL_SECONDS: ${DEPLOYMENT_POLL_SECONDS:-15}   # how fast the API follows a canary/promotion
+    AIRFLOW_URL: http://airflow:8080                          # drift job starts the self-healing DAG here
+    AIRFLOW_USER: admin
+    AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+    ADMIN_TOKEN: ${ADMIN_TOKEN:-}                             # if set, approve/reject/rollback need it
+  volumes: &app-volumes
+    - ./models:/app/models:ro
+    - ./data/reference:/app/data/reference:ro
+    - drift-reports:/app/reports
+
+# Shared settings for the Airflow services (Phase 6). Only airflow-init builds the image.
+x-airflow: &airflow
+  image: cardioguard-airflow:latest
+  pull_policy: never
+  restart: unless-stopped
+  logging: *logging
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-cardio}:${POSTGRES_PASSWORD:-cardio}@postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"   # triggered runs start straight away
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_SECRET:-cardioguard-dev-secret-change-me}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET:-cardioguard-dev-secret-change-me}
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin            # user "admin" with role admin
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_passwords.json
+    AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+    # what the CardioGuard steps inside the DAG use
+    DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-cardio}:${POSTGRES_PASSWORD:-cardio}@postgres:5432/cardio
+    MONGO_URI: mongodb://mongodb:27017
+    MONGO_DB: cardioguard
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    PUSHGATEWAY_URL: pushgateway:9091
+    PROMETHEUS_URL: http://prometheus:9090
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+  volumes:
+    - ./data/processed:/opt/cardioguard/data/processed:ro   # training/validation sets
+    - ./data/reference:/opt/cardioguard/data/reference:ro   # pseudo-labelling seed data
+    - ./models:/opt/cardioguard/models:ro                   # fallback champion (no registry)
+
+services:
+  # ---------------- data stores ----------------
+  postgres:
+    image: postgres:16
+    container_name: cardio-postgres
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cardio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardio}
+      POSTGRES_DB: cardio
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cardio} -d cardio"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mongodb:
+    image: mongo:7
+    container_name: cardio-mongo
+    restart: unless-stopped
+    logging: *logging
+    ports: ["27017:27017"]
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Creates the "mlflow" and "airflow" databases if missing. (infra/postgres/init.sql only
+  # runs on a brand-new Postgres volume, so this also covers volumes from Phases 2-5.)
+  db-init:
+    image: postgres:16
+    restart: "no"
+    logging: *logging
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-cardio}
+      PGUSER: ${POSTGRES_USER:-cardio}
+    entrypoint:                        # plain shell, not the Postgres server entrypoint
+      - sh
+      - -c
+      - |
+        for db in mlflow airflow; do
+          psql -h postgres -d cardio -tAc "SELECT 1 FROM pg_database WHERE datname='$$db'" | grep -q 1 \
+            || psql -h postgres -d cardio -c "CREATE DATABASE $$db"
+        done
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  # ---------------- model registry (Phase 6) ----------------
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/mlflow.Dockerfile
+    image: cardioguard-mlflow:latest
+    pull_policy: never
+    container_name: cardio-mlflow
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=postgresql+psycopg2://${POSTGRES_USER:-cardio}:${POSTGRES_PASSWORD:-cardio}@postgres:5432/mlflow
+      - --artifacts-destination=/mlartifacts
+      - --serve-artifacts
+      # MLflow 3 rejects unknown Host headers (DNS-rebinding protection): list the names we use
+      - --allowed-hosts=mlflow,mlflow:5000,localhost,localhost:5000,localhost:${MLFLOW_PORT:-5000},127.0.0.1,127.0.0.1:5000,127.0.0.1:${MLFLOW_PORT:-5000}
+    ports: ["${MLFLOW_PORT:-5000}:5000"]
+    volumes:
+      - mlartifacts:/mlartifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      db-init: {condition: service_completed_successfully}
+
+  # ---------------- application (Phase 4) ----------------
+  # One-off: copy the reference data into Postgres; register the first champion in MLflow
+  # (Phase 6, skipped if one exists). Then exit.
+  bootstrap:
+    <<: *app
+    command: ["sh", "-c", "python -m training.load_reference && python -m mlops.bootstrap"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+      mlflow: {condition: service_healthy}
+
+  api:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    restart: unless-stopped
+    expose: ["8000"]                   # reached through nginx, not published directly
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s                # model + SHAP explainer load at start
+    depends_on:
+      postgres: {condition: service_healthy}
+      mongodb: {condition: service_healthy}
+      bootstrap: {condition: service_completed_successfully}
+      mlflow: {condition: service_healthy}
+
+  # Replaces "python -m monitoring.scheduler" in a terminal.
+  # Every DRIFT_EVERY_MINUTES: drift check (Phase 2), then pseudo-labelling (Phase 5).
+  drift-scheduler:
+    <<: *app
+    container_name: cardio-drift-scheduler
+    command: ["python", "-m", "monitoring.scheduler", "--every", "${DRIFT_EVERY_MINUTES:-60}"]
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_healthy}   # the API creates the predictions table
+      pushgateway: {condition: service_started}
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: cardio-nginx
+    restart: unless-stopped
+    logging: *logging
+    ports: ["${API_PORT:-8000}:80"]
+    volumes:
+      - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      api: {condition: service_healthy}
+
+  # On demand: retrain inside the same image, so the model matches the image's libraries.
+  #   docker compose --profile tools run --rm trainer
+  trainer:
+    <<: *app
+    profiles: ["tools"]
+    user: root                          # writes to ./models and ./data on your computer
+    command: ["sh", "-c", "python -m training.data_prep --input data/raw/cardio_train.xlsx && python -m training.train && python -m training.load_reference"]
+    restart: "no"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  # ---------------- monitoring (Phase 3) ----------------
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    container_name: cardio-pushgateway
+    restart: unless-stopped
+    logging: *logging
+    ports: ["9091:9091"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: cardio-prometheus
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle          # reload config: curl -X POST localhost:9090/-/reload
+    ports: ["9090:9090"]
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - ./infra/prometheus/rules_test.yml:/etc/prometheus/rules_test.yml:ro
+      - prometheusdata:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on: [pushgateway]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: cardio-grafana
+    restart: unless-stopped
+    logging: *logging
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/cardioguard.json
+      POSTGRES_USER: ${POSTGRES_USER:-cardio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardio}
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on: [prometheus, postgres]
+
+  # ---------------- self-healing (Phase 6) ----------------
+  # Airflow 3: api-server (UI + REST API), scheduler (runs the tasks, LocalExecutor) and
+  # dag-processor (reads dags/). The ML steps run in the image's /opt/cardio venv.
+  airflow-init:
+    <<: *airflow
+    build:
+      context: .
+      dockerfile: docker/airflow.Dockerfile
+    command: ["db", "migrate"]
+    restart: "no"
+    depends_on:
+      db-init: {condition: service_completed_successfully}
+
+  airflow:
+    <<: *airflow
+    container_name: cardio-airflow
+    # the admin password comes from .env (AIRFLOW_PASSWORD), not a random generated one
+    command:
+      - bash
+      - -c
+      - |
+        printf '{"admin": "%s"}' "$$AIRFLOW_PASSWORD" > "$$AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"
+        exec airflow api-server
+    ports: ["${AIRFLOW_PORT:-8080}:8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v2/monitor/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    depends_on:
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-scheduler:
+    <<: *airflow
+    container_name: cardio-airflow-scheduler
+    command: ["scheduler"]
+    depends_on:
+      airflow: {condition: service_healthy}
+      mlflow: {condition: service_healthy}
+
+  airflow-dag-processor:
+    <<: *airflow
+    container_name: cardio-airflow-dag-processor
+    command: ["dag-processor"]
+    depends_on:
+      airflow-init: {condition: service_completed_successfully}
+
+volumes:
+  mlartifacts:
+  pgdata:
+  mongodata:
+  prometheusdata:
+  grafanadata:
+  drift-reports:

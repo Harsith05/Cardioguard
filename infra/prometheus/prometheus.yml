@@ -1,0 +1,37 @@
+# Prometheus config.
+# Phase 4: the API runs in Docker. Prometheus finds EVERY api container through Docker's
+# DNS (dns_sd_configs), so `docker compose up --scale api=3` is monitored automatically.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+  - job_name: cardioguard-api
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ["api"]
+        type: A
+        port: 8000
+        refresh_interval: 15s
+    relabel_configs:
+      - target_label: service
+        replacement: prediction-api
+
+  # Only if you still run uvicorn on your computer instead of in Docker.
+  # Its "up" is ignored by the alerts (different job name).
+  # - job_name: cardioguard-api-host
+  #   static_configs:
+  #     - targets: ["host.docker.internal:8000"]
+
+  # Drift job results (pushed by monitoring/drift_job.py)
+  - job_name: pushgateway
+    honor_labels: true          # keep job="cardioguard_drift" from the pushed metrics
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

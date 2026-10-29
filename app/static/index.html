@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CardioGuard Risk Check</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #EEF2F5;
+    --surface: #FFFFFF;
+    --ink: #1B2733;
+    --muted: #5B6B7A;
+    --line: #D5DDE3;
+    --primary: #0F5E66;
+    --primary-ink: #FFFFFF;
+    --low: #2E7D5B;
+    --mid: #B07A12;
+    --high: #B23A3A;
+    --error: #B23A3A;
+    --radius-field: 6px;
+    --radius-panel: 12px;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px; line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+  }
+  :focus-visible { outline: 3px solid color-mix(in srgb, var(--primary) 55%, transparent); outline-offset: 2px; }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 24px 48px; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }
+  h1 { font-size: 28px; line-height: 1.2; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0; max-width: 60ch; }
+  .presets { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 24px; align-items: start; }
+
+  form { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-panel); padding: 8px 28px 28px; }
+  fieldset { border: 0; margin: 0; padding: 20px 0 4px; border-bottom: 1px solid var(--line); }
+  fieldset:last-of-type { border-bottom: 0; }
+  legend { font-size: 17px; font-weight: 600; padding: 0; margin-bottom: 14px; float: left; width: 100%; }
+  legend + * { clear: both; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; }
+
+  .field label, .field .label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; }
+  .unit-input { position: relative; }
+  .unit-input input {
+    width: 100%; font: inherit; color: var(--ink); background: #fff;
+    border: 1px solid var(--line); border-radius: var(--radius-field);
+    padding: 10px 52px 10px 12px; min-height: 44px;
+  }
+  .unit-input input:hover { border-color: #AEBBC6; }
+  .unit-input input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent); }
+  .unit-input .unit { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 14px; pointer-events: none; }
+  .field.invalid input { border-color: var(--error); }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 4px; min-height: 18px; }
+  .field.invalid .hint { color: var(--error); }
+
+  /* segmented controls for coded categories */
+  .seg { display: flex; border: 1px solid var(--line); border-radius: var(--radius-field); overflow: hidden; background: #fff; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label { flex: 1; margin: 0; text-align: center; padding: 10px 8px; min-height: 44px; font-size: 14px; font-weight: 500; cursor: pointer; border-left: 1px solid var(--line); display: flex; align-items: center; justify-content: center; }
+  .seg label:first-of-type { border-left: 0; }
+  .seg input:checked + label { background: color-mix(in srgb, var(--primary) 10%, #fff); color: var(--primary); font-weight: 600; box-shadow: inset 0 -3px 0 var(--primary); }
+  .seg input:focus-visible + label { outline: 3px solid color-mix(in srgb, var(--primary) 55%, transparent); outline-offset: -3px; }
+
+  .derived { display: flex; gap: 24px; margin-top: 14px; font-size: 14px; color: var(--muted); }
+  .derived b { color: var(--ink); font-weight: 600; }
+
+  .actions { display: flex; gap: 12px; align-items: center; margin-top: 24px; flex-wrap: wrap; }
+  button { font: inherit; cursor: pointer; border-radius: var(--radius-field); min-height: 44px; }
+  .btn-primary { background: var(--primary); color: var(--primary-ink); border: 0; padding: 10px 22px; font-weight: 600; }
+  .btn-primary:hover { background: #0B4A51; }
+  .btn-primary[disabled] { opacity: .6; cursor: progress; }
+  .btn-quiet { background: transparent; color: var(--primary); border: 1px solid var(--line); padding: 8px 14px; font-size: 14px; font-weight: 500; }
+  .btn-quiet:hover { border-color: var(--primary); }
+  .form-error { color: var(--error); font-size: 14px; }
+
+  /* result panel */
+  aside { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-panel); padding: 24px; }
+  .empty { color: var(--muted); }
+  .empty p { margin: 0 0 8px; }
+  .pct { font-size: 64px; line-height: 1; font-weight: 700; letter-spacing: -0.03em; margin: 4px 0 6px; }
+  .verdict { font-size: 18px; font-weight: 600; margin: 0 0 20px; }
+  .lvl-low { color: var(--low); } .lvl-moderate { color: var(--mid); } .lvl-high { color: var(--high); }
+
+  .scale { position: relative; margin: 8px 0 34px; }
+  .bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; }
+  .bar span:nth-child(1) { width: 40%; background: color-mix(in srgb, var(--low) 70%, #fff); }
+  .bar span:nth-child(2) { width: 30%; background: color-mix(in srgb, var(--mid) 70%, #fff); }
+  .bar span:nth-child(3) { width: 30%; background: color-mix(in srgb, var(--high) 70%, #fff); }
+  .marker { position: absolute; top: -6px; width: 4px; height: 26px; margin-left: -2px; background: var(--ink); border-radius: 2px; box-shadow: 0 0 0 3px #fff; transition: left .6s cubic-bezier(.2,.8,.2,1); }
+  .ticks { position: absolute; left: 0; right: 0; top: 20px; font-size: 12px; color: var(--muted); }
+  .ticks span { position: absolute; transform: translateX(-50%); }
+  .ticks span:first-child { transform: none; } .ticks span:last-child { transform: translateX(-100%); }
+
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0; font-size: 14px; }
+  dt { color: var(--muted); } dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+  .divider { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+
+  .feedback p { margin: 0 0 10px; font-size: 14px; }
+  .feedback .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .feedback .done { color: var(--low); font-weight: 500; font-size: 14px; }
+
+  /* SHAP explanation */
+  .why h2 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .why .lead { font-size: 14px; color: var(--muted); margin: 0 0 12px; }
+  .why .lead b { color: var(--ink); font-weight: 600; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .shap-list { list-style: none; margin: 0; padding: 0; }
+  .shap-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 12px; align-items: center; padding: 7px 0; border-top: 1px solid #EDF1F4; }
+  .shap-row:first-child { border-top: 0; }
+  .shap-name { font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .shap-val { font-size: 13px; color: var(--muted); line-height: 1.3; }
+  .track { position: relative; height: 20px; }
+  .track::before { content: ""; position: absolute; left: 50%; top: -4px; bottom: -4px; width: 1px; background: #AEBBC6; }
+  .track .b { position: absolute; top: 4px; height: 12px; border-radius: 2px; }
+  .track .b.up { left: 50%; background: var(--high); }
+  .track .b.down { right: 50%; background: var(--low); }
+  .track .n { position: absolute; top: 2px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .toggle { margin-top: 10px; }
+  .toggle[aria-pressed="true"] { border-color: var(--primary); }
+  .footnote { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+
+  details.global { margin-top: 16px; font-size: 14px; }
+  details.global summary { cursor: pointer; font-weight: 600; color: var(--primary); padding: 6px 0; }
+  .imp-row { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 10px; align-items: center; padding: 4px 0; font-size: 13px; }
+  .imp-bar { height: 10px; border-radius: 2px; background: var(--primary); opacity: .75; }
+
+  .note { font-size: 13px; color: var(--muted); margin: 20px 0 0; }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: flex-start; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; margin-top: 6px; }
+  .dot.ok { background: var(--low); } .dot.bad { background: var(--high); }
+
+  @media (max-width: 960px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 380px) {
+    .shap-row { grid-template-columns: minmax(0, 1fr) 120px; }
+  }
+  @media (max-width: 520px) {
+    .wrap { padding: 20px 16px 32px; }
+    form { padding: 4px 16px 20px; }
+    .grid { grid-template-columns: 1fr; }
+    .pct { font-size: 52px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .marker { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>CardioGuard risk check</h1>
+      <p class="sub">Enter a patient's measurements to estimate their chance of cardiovascular disease.</p>
+    </div>
+    <div class="presets" aria-label="Sample patients">
+      <button type="button" class="btn-quiet" data-preset="low">Use a lower-risk sample</button>
+      <button type="button" class="btn-quiet" data-preset="high">Use a higher-risk sample</button>
+      <a class="btn-quiet" href="/monitoring" style="display:inline-flex;align-items:center;text-decoration:none;border-radius:var(--radius-field);min-height:44px">Model monitoring</a>
+    </div>
+  </header>
+
+  <div class="layout">
+    <form id="form" novalidate>
+      <fieldset>
+        <legend>Patient</legend>
+        <div class="grid">
+          <div class="field" data-name="age_years">
+            <label for="age_years">Age</label>
+            <div class="unit-input"><input id="age_years" name="age_years" type="number" inputmode="decimal" min="18" max="100" step="1" required><span class="unit">years</span></div>
+            <div class="hint">18 to 100</div>
+          </div>
+          <div class="field" data-name="gender">
+            <span class="label" id="gender-l">Sex</span>
+            <div class="seg" role="radiogroup" aria-labelledby="gender-l">
+              <input type="radio" id="g1" name="gender" value="1" checked><label for="g1">Female</label>
+              <input type="radio" id="g2" name="gender" value="2"><label for="g2">Male</label>
+            </div>
+            <div class="hint"></div>
+          </div>
+          <div class="field" data-name="height">
+            <label for="height">Height</label>
+            <div class="unit-input"><input id="height" name="height" type="number" inputmode="decimal" min="120" max="220" required><span class="unit">cm</span></div>
+            <div class="hint">120 to 220</div>
+          </div>
+          <div class="field" data-name="weight">
+            <label for="weight">Weight</label>
+            <div class="unit-input"><input id="weight" name="weight" type="number" inputmode="decimal" min="30" max="200" step="0.1" required><span class="unit">kg</span></div>
+            <div class="hint">30 to 200</div>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Blood pressure</legend>
+        <div class="grid">
+          <div class="field" data-name="ap_hi">
+            <label for="ap_hi">Systolic (upper number)</label>
+            <div class="unit-input"><input id="ap_hi" name="ap_hi" type="number" inputmode="numeric" min="80" max="250" required><span class="unit">mmHg</span></div>
+            <div class="hint">80 to 250</div>
+          </div>
+          <div class="field" data-name="ap_lo">
+            <label for="ap_lo">Diastolic (lower number)</label>
+            <div class="unit-input"><input id="ap_lo" name="ap_lo" type="number" inputmode="numeric" min="40" max="160" required><span class="unit">mmHg</span></div>
+            <div class="hint">40 to 160, below systolic</div>
+          </div>
+        </div>
+        <div class="derived" aria-live="polite">
+          <span>BMI <b id="bmi">–</b></span>
+          <span>Pulse pressure <b id="pp">–</b></span>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Lab results</legend>
+        <div class="grid">
+          <div class="field" data-name="cholesterol">
+            <span class="label" id="chol-l">Cholesterol</span>
+            <div class="seg" role="radiogroup" aria-labelledby="chol-l">
+              <input type="radio" id="c1" name="cholesterol" value="1" checked><label for="c1">Normal</label>
+              <input type="radio" id="c2" name="cholesterol" value="2"><label for="c2">Above</label>
+              <input type="radio" id="c3" name="cholesterol" value="3"><label for="c3">Well above</label>
+            </div>
+            <div class="hint"></div>
+          </div>
+          <div class="field" data-name="gluc">
+            <span class="label" id="gluc-l">Glucose</span>
+            <div class="seg" role="radiogroup" aria-labelledby="gluc-l">
+              <input type="radio" id="u1" name="gluc" value="1" checked><label for="u1">Normal</label>
+              <input type="radio" id="u2" name="gluc" value="2"><label for="u2">Above</label>
+              <input type="radio" id="u3" name="gluc" value="3"><label for="u3">Well above</label>
+            </div>
+            <div class="hint"></div>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Lifestyle</legend>
+        <div class="grid">
+          <div class="field" data-name="smoke">
+            <span class="label" id="smoke-l">Smokes</span>
+            <div class="seg" role="radiogroup" aria-labelledby="smoke-l">
+              <input type="radio" id="s0" name="smoke" value="0" checked><label for="s0">No</label>
+              <input type="radio" id="s1" name="smoke" value="1"><label for="s1">Yes</label>
+            </div>
+          </div>
+          <div class="field" data-name="alco">
+            <span class="label" id="alco-l">Drinks alcohol</span>
+            <div class="seg" role="radiogroup" aria-labelledby="alco-l">
+              <input type="radio" id="a0" name="alco" value="0" checked><label for="a0">No</label>
+              <input type="radio" id="a1" name="alco" value="1"><label for="a1">Yes</label>
+            </div>
+          </div>
+          <div class="field" data-name="active">
+            <span class="label" id="active-l">Physically active</span>
+            <div class="seg" role="radiogroup" aria-labelledby="active-l">
+              <input type="radio" id="p1" name="active" value="1" checked><label for="p1">Yes</label>
+              <input type="radio" id="p0" name="active" value="0"><label for="p0">No</label>
+            </div>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="actions">
+        <button type="submit" class="btn-primary" id="submit">Check risk</button>
+        <button type="button" class="btn-quiet" id="reset">Clear form</button>
+        <span class="form-error" id="form-error" role="alert"></span>
+      </div>
+    </form>
+
+    <aside aria-live="polite">
+      <div id="empty" class="empty">
+        <p><strong>No result yet.</strong></p>
+        <p>Fill in the form and choose Check risk, or start from a sample patient.</p>
+      </div>
+
+      <div id="result" hidden>
+        <div class="pct" id="pct">–</div>
+        <p class="verdict" id="verdict">–</p>
+
+        <div class="scale" role="img" id="scale-img" aria-label="Risk scale">
+          <div class="bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="marker" id="marker" style="left:0%"></div>
+          <div class="ticks" aria-hidden="true">
+            <span style="left:0%">0%</span><span style="left:40%">40%</span><span style="left:70%">70%</span><span style="left:100%">100%</span>
+          </div>
+        </div>
+
+        <dl>
+          <dt>Model prediction</dt><dd id="r-class">–</dd>
+          <dt>Model version</dt><dd id="r-version">–</dd>
+          <dt>Request ID</dt><dd id="r-id">–</dd>
+        </dl>
+
+        <hr class="divider">
+        <section class="why" id="why" hidden aria-labelledby="why-h">
+          <h2 id="why-h">Why this result</h2>
+          <p class="lead" id="why-lead"></p>
+          <div class="legend" aria-hidden="true"><span><i style="background:var(--high)"></i>Raises risk</span><span><i style="background:var(--low)"></i>Lowers risk</span></div>
+          <ul class="shap-list" id="shap-list"></ul>
+          <button type="button" class="btn-quiet toggle" id="shap-toggle" aria-pressed="false">Show each measurement</button>
+          <p class="footnote">Contributions are SHAP values (log-odds). They add up from the average risk to this patient's risk.</p>
+          <details class="global" id="global" hidden>
+            <summary>What the model relies on overall</summary>
+            <div id="global-list"></div>
+            <p class="footnote" id="global-note"></p>
+          </details>
+        </section>
+        <hr class="divider" id="why-divider" hidden>
+
+        <div class="feedback" id="feedback">
+          <p>Diagnosis confirmed later? Record it to help retrain the model.</p>
+          <div class="row">
+            <button type="button" class="btn-quiet" data-label="1">Has heart disease</button>
+            <button type="button" class="btn-quiet" data-label="0">No heart disease</button>
+          </div>
+        </div>
+      </div>
+
+      <p class="note">For research use only. This estimate is not a medical diagnosis.</p>
+    </aside>
+  </div>
+
+  <footer>
+    <span class="dot" id="api-dot"></span><span id="api-status">Checking the prediction service…</span>
+  </footer>
+</div>
+
+<script>
+const API = "";  // same origin as FastAPI; set to "http://localhost:8000" if served elsewhere
+const $ = (s) => document.querySelector(s);
+const form = $("#form");
+const NUMERIC = { age_years: [18, 100], height: [120, 220], weight: [30, 200], ap_hi: [80, 250], ap_lo: [40, 160] };
+const PRESETS = {
+  low:  { age_years: 34, gender: 1, height: 165, weight: 60, ap_hi: 115, ap_lo: 75, cholesterol: 1, gluc: 1, smoke: 0, alco: 0, active: 1 },
+  high: { age_years: 61, gender: 2, height: 170, weight: 98, ap_hi: 165, ap_lo: 100, cholesterol: 3, gluc: 2, smoke: 1, alco: 0, active: 0 },
+};
+let lastRequestId = null;
+
+function fieldEl(name) { return form.querySelector(`.field[data-name="${name}"]`); }
+function setError(name, msg) {
+  const f = fieldEl(name); if (!f) return;
+  const hint = f.querySelector(".hint");
+  if (!f.dataset.defaultHint) f.dataset.defaultHint = hint ? hint.textContent : "";
+  f.classList.toggle("invalid", !!msg);
+  if (hint) hint.textContent = msg || f.dataset.defaultHint;
+  const input = f.querySelector("input[type=number]");
+  if (input) input.setAttribute("aria-invalid", msg ? "true" : "false");
+}
+function clearErrors() { Object.keys(NUMERIC).forEach((n) => setError(n, "")); $("#form-error").textContent = ""; }
+
+function readForm() {
+  const d = new FormData(form), out = {};
+  for (const [k, v] of d.entries()) out[k] = v === "" ? null : Number(v);
+  return out;
+}
+function validate(p) {
+  let ok = true;
+  for (const [n, [lo, hi]] of Object.entries(NUMERIC)) {
+    if (p[n] === null || Number.isNaN(p[n])) { setError(n, "Enter a value"); ok = false; }
+    else if (p[n] < lo || p[n] > hi) { setError(n, `Must be between ${lo} and ${hi}`); ok = false; }
+  }
+  if (ok && p.ap_lo >= p.ap_hi) { setError("ap_lo", "Must be lower than systolic"); ok = false; }
+  return ok;
+}
+
+function updateDerived() {
+  const p = readForm();
+  const bmi = p.height && p.weight ? p.weight / ((p.height / 100) ** 2) : null;
+  $("#bmi").textContent = bmi && isFinite(bmi) ? bmi.toFixed(1) : "–";
+  $("#pp").textContent = p.ap_hi && p.ap_lo ? `${p.ap_hi - p.ap_lo} mmHg` : "–";
+}
+
+function fill(values) {
+  for (const [k, v] of Object.entries(values)) {
+    const num = form.querySelector(`input[type=number][name="${k}"]`);
+    if (num) num.value = v;
+    else { const r = form.querySelector(`input[name="${k}"][value="${v}"]`); if (r) r.checked = true; }
+  }
+  clearErrors(); updateDerived();
+}
+
+const VERDICT = { low: "Low risk", moderate: "Moderate risk", high: "High risk" };
+function showResult(r) {
+  const pct = Math.round(r.probability * 100);
+  $("#empty").hidden = true; $("#result").hidden = false;
+  const lvl = `lvl-${r.risk_label}`;
+  $("#pct").textContent = `${pct}%`; $("#pct").className = `pct ${lvl}`;
+  $("#verdict").textContent = VERDICT[r.risk_label] || r.risk_label; $("#verdict").className = `verdict ${lvl}`;
+  $("#marker").style.left = `${Math.min(100, Math.max(0, r.probability * 100))}%`;
+  $("#scale-img").setAttribute("aria-label", `Risk scale: ${pct}%, ${VERDICT[r.risk_label]}`);
+  $("#r-class").textContent = r.prediction === 1 ? "Likely disease" : "Likely no disease";
+  $("#r-version").textContent = r.model_version;
+  $("#r-id").textContent = r.request_id;
+  lastRequestId = r.request_id;
+  resetFeedback();
+  showExplanation(r.explanation, r.probability);
+  // single-column layout: the result sits below the form, so bring it into view
+  if (matchMedia("(max-width: 900px)").matches) {
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    document.querySelector("aside").scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  }
+}
+
+// ---- SHAP explanation ---------------------------------------------------
+let lastExplanation = null, detailed = false;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function showExplanation(exp, probability) {
+  const has = !!exp;
+  $("#why").hidden = !has; $("#why-divider").hidden = !has;
+  if (!has) return;
+  lastExplanation = exp;
+  $("#why-lead").innerHTML = `The average patient in the training data has a <b>${Math.round(exp.base_probability * 100)}%</b> risk. ` +
+    `These factors moved this patient to <b>${Math.round(probability * 100)}%</b>.`;
+  renderShap();
+}
+
+function renderShap() {
+  const exp = lastExplanation; if (!exp) return;
+  const items = detailed ? exp.features.slice(0, 8) : exp.groups;
+  const max = Math.max(...items.map((d) => Math.abs(d.shap)), 1e-6);
+  $("#shap-list").innerHTML = items.map((d) => {
+    const w = (Math.abs(d.shap) / max) * 48;   // % of the track; 50% is the centre
+    const up = d.shap >= 0;
+    const num = Math.abs(d.shap) < 0.005 ? "0.00" : `${up ? "+" : "−"}${Math.abs(d.shap).toFixed(2)}`;
+    // the number sits on the empty side of the centre line, so it always fits
+    const numPos = up ? "right:calc(50% + 5px)" : "left:calc(50% + 5px)";
+    const effect = Math.abs(d.shap) < 0.01 ? "barely changes" : up ? "raises" : "lowers";
+    return `<li class="shap-row">
+      <div><div class="shap-name">${esc(d.label)}</div><div class="shap-val">${esc(d.value)}</div></div>
+      <div class="track" role="img" aria-label="${esc(d.label)} ${effect} risk (${num})">
+        <span class="b ${up ? "up" : "down"}" style="width:${w}%"></span>
+        <span class="n" style="${numPos}" aria-hidden="true">${num}</span>
+      </div></li>`;
+  }).join("");
+  $("#shap-toggle").textContent = detailed ? "Combine related measurements" : "Show each measurement";
+  $("#shap-toggle").setAttribute("aria-pressed", String(detailed));
+}
+$("#shap-toggle").addEventListener("click", () => { detailed = !detailed; renderShap(); });
+
+async function loadGlobal() {
+  try {
+    const res = await fetch(`${API}/explain/global`); if (!res.ok) return;
+    const g = await res.json();
+    const max = Math.max(...g.groups.map((d) => d.mean_abs_shap));
+    $("#global-list").innerHTML = g.groups.map((d) =>
+      `<div class="imp-row"><span>${esc(d.label)}</span><div class="imp-bar" style="width:${(d.mean_abs_shap / max) * 100}%" role="img" aria-label="${esc(d.label)}: ${d.mean_abs_shap.toFixed(2)}"></div></div>`).join("");
+    $("#global-note").textContent = `Average size of each factor's SHAP contribution across ${g.sample_size.toLocaleString()} training patients.`;
+    $("#global").hidden = false;
+  } catch { /* explanations are optional */ }
+}
+
+function resetFeedback() {
+  $("#feedback").innerHTML = `<p>Diagnosis confirmed later? Record it to help retrain the model.</p>
+    <div class="row"><button type="button" class="btn-quiet" data-label="1">Has heart disease</button>
+    <button type="button" class="btn-quiet" data-label="0">No heart disease</button></div>`;
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault(); clearErrors();
+  const p = readForm();
+  if (!validate(p)) { $("#form-error").textContent = "Fix the highlighted fields to continue."; return; }
+  const btn = $("#submit"); btn.disabled = true; btn.textContent = "Checking…";
+  try {
+    const opts = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) };
+    let res = await fetch(`${API}/predict/explain`, opts);
+    if (res.status === 503 || res.status === 404) res = await fetch(`${API}/predict`, opts);  // no SHAP: plain prediction
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 422 && Array.isArray(body.detail)) {
+      body.detail.forEach((d) => { const name = d.loc && d.loc[d.loc.length - 1]; setError(NUMERIC[name] ? name : "ap_lo", d.msg.replace(/^Value error, /, "")); });
+      $("#form-error").textContent = "Fix the highlighted fields to continue.";
+    } else if (!res.ok) {
+      $("#form-error").textContent = `The service returned an error (${res.status}). Try again.`;
+    } else { showResult(body); }
+  } catch {
+    $("#form-error").textContent = "Can't reach the prediction service. Check that the API is running.";
+  } finally { btn.disabled = false; btn.textContent = "Check risk"; }
+});
+
+$("#feedback").parentElement.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-label]"); if (!b || !lastRequestId) return;
+  const label = Number(b.dataset.label);
+  b.disabled = true;
+  try {
+    const res = await fetch(`${API}/feedback/${lastRequestId}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label }) });
+    if (res.ok) $("#feedback").innerHTML = `<p class="done">Diagnosis recorded: ${label ? "has heart disease" : "no heart disease"}.</p>`;
+    else if (res.status === 503) $("#feedback").insertAdjacentHTML("beforeend", `<p class="form-error">Diagnosis not recorded: the database is offline.</p>`);
+    else $("#feedback").insertAdjacentHTML("beforeend", `<p class="form-error">Diagnosis not recorded (error ${res.status}).</p>`);
+  } catch { $("#feedback").insertAdjacentHTML("beforeend", `<p class="form-error">Diagnosis not recorded: can't reach the service.</p>`); }
+  finally { b.disabled = false; }
+});
+
+document.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", () => fill(PRESETS[b.dataset.preset])));
+$("#reset").addEventListener("click", () => {
+  form.reset(); clearErrors(); updateDerived();
+  $("#result").hidden = true; $("#empty").hidden = false; lastRequestId = null;
+});
+form.addEventListener("input", updateDerived);
+
+(async function health() {
+  try {
+    const h = await (await fetch(`${API}/health`)).json();
+    const ok = h.status === "ok";
+    $("#api-dot").className = `dot ${ok ? "ok" : "bad"}`;
+    const db = h.logging && h.logging.sql ? "saving predictions to the database" : "not saving predictions (database offline)";
+    $("#api-status").textContent = ok ? `Model ${h.model_version} ready, ${db}.` : "Prediction service is running, but no model is loaded.";
+  } catch {
+    $("#api-dot").className = "dot bad";
+    $("#api-status").textContent = "Can't reach the prediction service. Start it with: uvicorn app.main:app --port 8000";
+  }
+})();
+updateDerived();
+loadGlobal();
+</script>
+</body>
+</html>

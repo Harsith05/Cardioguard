@@ -1,0 +1,244 @@
+# Unit tests for rules.yml. Run:
+#   promtool test rules infra/prometheus/rules_test.yml
+# (inside Docker: docker compose exec prometheus promtool test rules /etc/prometheus/rules_test.yml)
+rule_files:
+  - rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  # 10% of predictions fail for 10 minutes -> HighPredictionErrorRate after 5 min "for"
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="cardioguard-api", handler="/predict", method="POST", status="2xx"}'
+        values: '0+135x40'       # 9 ok / s
+      - series: 'http_requests_total{job="cardioguard-api", handler="/predict", method="POST", status="5xx"}'
+        values: '0+15x40'        # 1 failure / s  -> 10%
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HighPredictionErrorRate
+        exp_alerts: []           # still inside the 5-minute "for" window
+      - eval_time: 10m
+        alertname: HighPredictionErrorRate
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: More than 5% of prediction requests are failing
+              description: "10% of /predict requests returned 5xx over the last 5 minutes."
+
+  # No failures at all: the ratio is 0 (not missing), so the dashboard shows 0%
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="cardioguard-api", handler="/predict", method="POST", status="2xx"}'
+        values: '0+150x40'
+    promql_expr_test:
+      - expr: cardioguard:prediction_error_ratio:rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'cardioguard:prediction_error_ratio:rate5m'
+            value: 0
+
+  # 1% failures stays below the 5% limit
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="cardioguard-api", handler="/predict", method="POST", status="2xx"}'
+        values: '0+148x40'
+      - series: 'http_requests_total{job="cardioguard-api", handler="/predict", method="POST", status="5xx"}'
+        values: '0+1.5x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighPredictionErrorRate
+        exp_alerts: []
+
+  # Every request takes ~1 s -> latency alert; recording rule gives the p95
+  - interval: 15s
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{job="cardioguard-api", handler="/predict", method="POST", le="0.5"}'
+        values: '0x40'
+      - series: 'http_request_duration_seconds_bucket{job="cardioguard-api", handler="/predict", method="POST", le="1"}'
+        values: '0+10x40'
+      - series: 'http_request_duration_seconds_bucket{job="cardioguard-api", handler="/predict", method="POST", le="+Inf"}'
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighPredictionLatency
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Predictions are slow
+              description: "95th-percentile prediction latency is 975ms (limit 500 ms)."
+
+  # The only API instance is down for 2 minutes -> both alerts
+  - interval: 15s
+    input_series:
+      - series: 'up{job="cardioguard-api", instance="172.18.0.5:8000"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PredictionAPIDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: cardioguard-api}
+            exp_annotations:
+              summary: Prediction API is not responding
+              description: No API instance has answered Prometheus for 1 minute.
+      - eval_time: 2m
+        alertname: PredictionAPIInstanceDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cardioguard-api, instance: "172.18.0.5:8000"}
+            exp_annotations:
+              summary: "API instance 172.18.0.5:8000 is not responding"
+              description: Other instances may still be serving traffic.
+
+  # API container removed entirely (no target at all) -> still detected
+  - interval: 15s
+    input_series:
+      - series: 'up{job="pushgateway", instance="pushgateway:9091"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PredictionAPIDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: cardioguard-api}
+            exp_annotations:
+              summary: Prediction API is not responding
+              description: No API instance has answered Prometheus for 1 minute.
+
+  # Two instances, one down -> only the instance warning
+  - interval: 15s
+    input_series:
+      - series: 'up{job="cardioguard-api", instance="172.18.0.5:8000"}'
+        values: '0x10'
+      - series: 'up{job="cardioguard-api", instance="172.18.0.6:8000"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PredictionAPIDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: PredictionAPIInstanceDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cardioguard-api, instance: "172.18.0.5:8000"}
+            exp_annotations:
+              summary: "API instance 172.18.0.5:8000 is not responding"
+              description: Other instances may still be serving traffic.
+
+  # Pseudo-labelling: acceptance fell to 3% on a successful run -> warning;
+  # a run skipped for drift (status 1) must NOT raise this alert
+  - interval: 15s
+    input_series:
+      - series: 'cardioguard_pseudo_label_acceptance_rate{job="cardioguard_pseudo_label"}'
+        values: '0.03x4'
+      - series: 'cardioguard_pseudo_label_status{job="cardioguard_pseudo_label"}'
+        values: '0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: LowPseudoLabelAcceptance
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cardioguard_pseudo_label}
+            exp_annotations:
+              summary: Few pseudo-labels accepted
+              description: "Only 3% of unconfirmed patients got a confident, agreed pseudo-label (usually about 13%). The model is much less sure about current patients."
+      - eval_time: 45s
+        alertname: LowPseudoLabelAcceptance
+        exp_alerts: []
+
+  # Normal acceptance (13%) must not alert
+  - interval: 15s
+    input_series:
+      - series: 'cardioguard_pseudo_label_acceptance_rate{job="cardioguard_pseudo_label"}'
+        values: '0.13x4'
+      - series: 'cardioguard_pseudo_label_status{job="cardioguard_pseudo_label"}'
+        values: '0x4'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: LowPseudoLabelAcceptance
+        exp_alerts: []
+
+  # Drift job pushed "critical" and "retrain recommended"
+  - interval: 15s
+    input_series:
+      - series: 'cardioguard_drift_status{job="cardioguard_drift", model_version="v1"}'
+        values: '2x4'
+      - series: 'cardioguard_drift_max_psi{job="cardioguard_drift", model_version="v1"}'
+        values: '1.93x4'
+      - series: 'cardioguard_retrain_recommended{job="cardioguard_drift", model_version="v1"}'
+        values: '1x4'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: DataDriftCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, job: cardioguard_drift, model_version: v1}
+            exp_annotations:
+              summary: Critical drift in the latest drift check
+              description: Highest PSI 1.93. Open the monitoring page for details.
+      - eval_time: 30s
+        alertname: DataDriftWarning
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: RetrainingRecommended
+        exp_alerts:
+          - exp_labels: {severity: critical, job: cardioguard_drift, model_version: v1}
+            exp_annotations:
+              summary: Retraining recommended
+              description: Critical drift in consecutive windows. The self-healing DAG (Airflow) has been started.
+
+  # Phase 6: a candidate waits for approval for 40 minutes -> alert after 30
+  - interval: 1m
+    input_series:
+      - series: 'cardioguard_deployment_status{job="cardioguard-api", instance="api-1"}'
+        values: '0 0 2x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RetrainingAwaitingApproval
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: RetrainingAwaitingApproval
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: A retrained model is waiting for a person to approve it
+              description: Inputs drifted (possibly a device fault). Approve or reject it on the monitoring page; it times out after 24 hours.
+
+  # Phase 6: rollback at minute 0 -> alert for one hour, then quiet
+  - interval: 1m
+    input_series:
+      - series: 'cardioguard_self_healing_outcome{job="cardioguard_self_healing", outcome="rolled_back", diagnosis="retrain_concept"}'
+        values: '9x90'
+      - series: 'cardioguard_self_healing_last_run_timestamp_seconds{job="cardioguard_self_healing"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ModelRolledBack
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: The retrained model was rolled back
+              description: It misbehaved during the canary (errors, latency or risk shift) or was rolled back by a person. The previous champion serves all traffic.
+      - eval_time: 80m
+        alertname: ModelRolledBack
+        exp_alerts: []
+
+  # Phase 6: candidate failed the promotion gates (code 6) -> critical
+  - interval: 1m
+    input_series:
+      - series: 'cardioguard_self_healing_outcome{job="cardioguard_self_healing", outcome="rejected_by_gates", diagnosis="retrain_needs_approval"}'
+        values: '6x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SelfHealingBlocked
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: Self-healing could not fix the drift
+              description: "Last run ended with code 6 (5 invalid data, 6 new model failed the checks, 10 a task crashed). The drifted model is still serving: a person must look at the data."
+
+  # Phase 6: a promotion (code 0) is not an alert
+  - interval: 1m
+    input_series:
+      - series: 'cardioguard_self_healing_outcome{job="cardioguard_self_healing", outcome="promoted", diagnosis="retrain_concept"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SelfHealingBlocked
+        exp_alerts: []
+

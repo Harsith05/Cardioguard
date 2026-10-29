@@ -1,0 +1,27 @@
+# Exact versions installed INSIDE the Docker image (Phase 4).
+# Pinned so every build is identical and the saved model always loads.
+# (requirements.txt is the looser list for your own computer.)
+pandas==3.0.5
+numpy==2.5.3
+scikit-learn==1.9.1
+lightgbm==4.7.0
+xgboost-cpu==3.4.1          # CPU-only build: same API, no 200 MB of GPU libraries
+joblib==1.6.0
+pyarrow==26.0.0
+openpyxl==3.1.5
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+sqlalchemy==2.1.6
+psycopg2-binary==2.9.13
+pymongo==4.19.0
+httpx==0.28.1
+shap==0.54.1
+evidently==0.7.23
+pyyaml==6.0.3
+prometheus-client==0.26.0
+prometheus-fastapi-instrumentator==8.1.0
+python-dotenv==1.2.3
+# Phase 6: model registry client + safe model format
+mlflow-skinny==3.17.2      # client only (the server is its own image: docker/mlflow.Dockerfile)
+skops==0.16.0

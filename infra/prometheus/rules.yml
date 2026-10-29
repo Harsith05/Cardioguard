@@ -1,0 +1,146 @@
+# Recording rules (pre-computed series used by the dashboard and alerts)
+# and alert rules (Phase 3). Unit tests: infra/prometheus/rules_test.yml
+groups:
+  - name: cardioguard-recording
+    rules:
+      - record: cardioguard:http_requests:rate1m
+        expr: sum by (handler) (rate(http_requests_total{job="cardioguard-api"}[1m]))
+
+      # "or vector(0)": before the first failure there is no 5xx series at all,
+      # and the ratio should read 0%, not "No data".
+      - record: cardioguard:prediction_error_ratio:rate5m
+        expr: |
+          (sum(rate(http_requests_total{job="cardioguard-api", handler=~"/predict.*", status="5xx"}[5m])) or vector(0))
+          /
+          sum(rate(http_requests_total{job="cardioguard-api", handler=~"/predict.*"}[5m]))
+
+      - record: cardioguard:prediction_latency_seconds:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{job="cardioguard-api", handler=~"/predict.*"}[5m])))
+
+  - name: cardioguard-service
+    rules:
+      # absent(... == 1): fires when NO api instance is up. With DNS discovery a stopped
+      # container disappears from the targets, so "up == 0" alone would never fire.
+      - alert: PredictionAPIDown
+        expr: absent(up{job="cardioguard-api"} == 1)
+        for: 1m
+        labels: {severity: critical, job: cardioguard-api}
+        annotations:
+          summary: Prediction API is not responding
+          description: No API instance has answered Prometheus for 1 minute.
+
+      - alert: PredictionAPIInstanceDown
+        expr: up{job="cardioguard-api"} == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "API instance {{ $labels.instance }} is not responding"
+          description: Other instances may still be serving traffic.
+
+      - alert: HighPredictionErrorRate
+        expr: cardioguard:prediction_error_ratio:rate5m > 0.05
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: More than 5% of prediction requests are failing
+          description: "{{ $value | humanizePercentage }} of /predict requests returned 5xx over the last 5 minutes."
+
+      - alert: HighPredictionLatency
+        expr: cardioguard:prediction_latency_seconds:p95_5m > 0.5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Predictions are slow
+          description: "95th-percentile prediction latency is {{ $value | humanizeDuration }} (limit 500 ms)."
+
+      - alert: PredictionLoggingDown
+        expr: cardioguard_db_logging_up{store="postgres"} == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Predictions are not being saved to PostgreSQL
+          description: Drift monitoring and retraining cannot see new traffic until logging is restored.
+
+      - alert: PredictionLogWritesFailing
+        expr: increase(cardioguard_log_failures_total{store="postgres"}[5m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Some prediction log writes to PostgreSQL are failing
+
+  - name: cardioguard-model
+    rules:
+      - alert: DataDriftWarning
+        expr: cardioguard_drift_status == 1
+        labels: {severity: warning}
+        annotations:
+          summary: Drift warning in the latest drift check
+          description: Open the monitoring page for the checks that triggered it.
+
+      - alert: DataDriftCritical
+        expr: cardioguard_drift_status == 2
+        labels: {severity: critical}
+        annotations:
+          summary: Critical drift in the latest drift check
+          description: "Highest PSI {{ with query \"cardioguard_drift_max_psi\" }}{{ . | first | value | printf \"%.2f\" }}{{ end }}. Open the monitoring page for details."
+
+      - alert: RetrainingRecommended
+        expr: cardioguard_retrain_recommended == 1
+        labels: {severity: critical}
+        annotations:
+          summary: Retraining recommended
+          description: Critical drift in consecutive windows. The self-healing DAG (Airflow) has been started.
+
+      # Phase 5: far fewer confident, agreeing pseudo-labels than usual means the model is much
+      # less sure about today's patients. Normal traffic gives ~13% with the current model.
+      - alert: LowPseudoLabelAcceptance
+        expr: cardioguard_pseudo_label_acceptance_rate < 0.05 and on() cardioguard_pseudo_label_status == 0
+        labels: {severity: warning}
+        annotations:
+          summary: Few pseudo-labels accepted
+          description: "Only {{ $value | humanizePercentage }} of unconfirmed patients got a confident, agreed pseudo-label (usually about 13%). The model is much less sure about current patients."
+
+      - alert: DriftCheckStale
+        expr: time() - cardioguard_drift_last_run_timestamp_seconds > 7200
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: No drift check for over 2 hours
+          description: Is the drift scheduler running? (python -m monitoring.scheduler)
+
+  # Phase 6: self-healing. Outcome codes: mlops/pipeline.py OUTCOME_CODE
+  # (0 promoted, 5 stopped bad data, 6 rejected by gates, 9 rolled back, 10 failed ...)
+  - name: cardioguard-self-healing
+    rules:
+      - alert: RetrainingAwaitingApproval
+        expr: max(cardioguard_deployment_status) == 2
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: A retrained model is waiting for a person to approve it
+          description: Inputs drifted (possibly a device fault). Approve or reject it on the monitoring page; it times out after 24 hours.
+
+      - alert: CanaryRunningTooLong
+        expr: max(cardioguard_deployment_status) == 1
+        for: 2h
+        labels: {severity: warning}
+        annotations:
+          summary: Canary release still running after 2 hours
+          description: The pipeline should promote or roll back within its wait time. Check the Airflow run; roll back on the monitoring page if needed.
+
+      # outcome gauges stay until the next run, so only alert for 1 hour after it happened
+      - alert: ModelRolledBack
+        expr: max(cardioguard_self_healing_outcome) == 9 and on() (time() - max(cardioguard_self_healing_last_run_timestamp_seconds)) < 3600
+        labels: {severity: warning}
+        annotations:
+          summary: The retrained model was rolled back
+          description: It misbehaved during the canary (errors, latency or risk shift) or was rolled back by a person. The previous champion serves all traffic.
+
+      - alert: SelfHealingBlocked
+        expr: max(cardioguard_self_healing_outcome) == 5 or max(cardioguard_self_healing_outcome) == 6 or max(cardioguard_self_healing_outcome) == 10
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: Self-healing could not fix the drift
+          description: "Last run ended with code {{ $value }} (5 invalid data, 6 new model failed the checks, 10 a task crashed). The drifted model is still serving: a person must look at the data."

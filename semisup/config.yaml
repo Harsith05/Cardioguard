@@ -1,0 +1,25 @@
+# Phase 5: pseudo-labelling of unlabelled production predictions.
+# Thresholds were chosen with the label-fraction experiment (python -m semisup.experiment).
+
+lookback_hours: 168          # consider unlabelled predictions from the last 7 days
+max_unlabelled: 5000         # newest unlabelled rows per run
+min_unlabelled: 200          # fewer than this -> skip the run
+reference_sample: 10000      # labelled training rows used next to human-confirmed diagnoses
+
+self_training:
+  threshold: 0.9             # keep a self-training label only if P >= 0.9 or P <= 0.1
+  max_iter: 10
+
+label_spreading:
+  n_neighbors: 10
+  alpha: 0.2
+  threshold: 0.7             # label-spreading confidence needed
+
+require_agreement: true      # both methods must give the same label
+
+# Guardrails (pseudo-labels can reinforce the model's own mistakes)
+max_accept_per_run: 2000     # one window cannot flood the training set
+max_pseudo_ratio: 1.0        # pseudo-labels in the training set <= 1x real labels
+balance_to_reference: true   # accept classes in the training data's ratio
+skip_if_drift_status: [critical]   # model confidence is unreliable under severe drift
+pseudo_label_weight: 0.5     # sample weight of a pseudo-label when retraining (real label = 1)

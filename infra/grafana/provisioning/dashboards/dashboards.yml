@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: CardioGuard
+    folder: CardioGuard
+    type: file
+    allowUiUpdates: true        # you can edit in the UI; re-run build_dashboard.py to reset
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,29 @@
+# Run CardioGuard from the images on Docker Hub instead of building them.
+#
+#   $env:DOCKERHUB_USER = "yourname"     # PowerShell   (bash: export DOCKERHUB_USER=yourname)
+#   docker compose -f docker-compose.yml -f docker-compose.hub.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.hub.yml up -d
+#
+# Still needed next to this file: data/ and models/ (mounted, not inside the images), and .env.
+# CARDIOGUARD_VERSION picks the image tag (default: latest).
+
+x-app-image: &app-image
+  image: ${DOCKERHUB_USER:?set DOCKERHUB_USER}/cardioguard-app:${CARDIOGUARD_VERSION:-latest}
+  pull_policy: missing
+
+x-airflow-image: &airflow-image
+  image: ${DOCKERHUB_USER:?set DOCKERHUB_USER}/cardioguard-airflow:${CARDIOGUARD_VERSION:-latest}
+  pull_policy: missing
+
+services:
+  bootstrap: *app-image
+  api: *app-image
+  drift-scheduler: *app-image
+  trainer: *app-image
+  mlflow:
+    image: ${DOCKERHUB_USER:?set DOCKERHUB_USER}/cardioguard-mlflow:${CARDIOGUARD_VERSION:-latest}
+    pull_policy: missing
+  airflow-init: *airflow-image
+  airflow: *airflow-image
+  airflow-scheduler: *airflow-image
+  airflow-dag-processor: *airflow-image
